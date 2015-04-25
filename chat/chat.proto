@@ -1,0 +1,11 @@
+package main;
+
+message ChatProtocol {
+  repeated Message messages = 1;
+  repeated string online = 2;
+
+  message Message {
+    required string from = 1;
+    required string text = 2;
+  }
+}

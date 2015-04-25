@@ -70,22 +70,32 @@ func (db *decBuffer) decodeField(field byte, data []byte) error {
 	val := reflect.ValueOf(db.val).Elem()
 
 	f := val.Field(finfo.GoField)
-	if f.Type().Elem().Kind() == reflect.String {
+	if f.Type().Kind() == reflect.Chan {
+		// This is a 'repeated' field
+		// we just encode this value and send it along
+
+		e := f.Type().Elem()
+		if e.Kind() == reflect.Ptr {
+			e = e.Elem()
+		}
+
+		newVal := reflect.New(e)
+		switch pv := newVal.Interface().(type) {
+		case proto.Message:
+			err := proto.Unmarshal(data, pv)
+			if err != nil {
+				return err
+			}
+			f.Send(newVal)
+		case *string:
+			*pv = string(data)
+			f.Send(newVal.Elem())
+		default:
+			return fmt.Errorf("Unrecognized type in protobuf field decode")
+		}
+	} else if f.Type().Elem().Kind() == reflect.String {
 		f.Set(reflect.New(f.Type().Elem()))
 		f.Elem().SetString(string(data))
-	} else if f.Type().Kind() == reflect.Chan {
-		// This is a 'repeated' field
-
-		protoVal := reflect.New(f.Type().Elem().Elem())
-		pbm, ok := protoVal.Interface().(proto.Message)
-		if !ok {
-			return errors.New("TODO: support non protobuf repeated field types")
-		}
-		err := proto.Unmarshal(data, pbm)
-		if err != nil {
-			return err
-		}
-		f.Send(protoVal)
 	} else {
 		fmt.Println("UNKNOWN")
 		fmt.Println(f)
@@ -215,7 +225,6 @@ func StreamEncode(w io.Writer, sm StreamMessage) error {
 	}
 
 	go func() {
-		fmt.Println("HELLO")
 		closeCase := reflect.SelectCase{
 			Chan: reflect.ValueOf(sm.Closed()),
 			Dir:  reflect.SelectRecv,
@@ -229,8 +238,7 @@ func StreamEncode(w io.Writer, sm StreamMessage) error {
 			if fprop.Repeated {
 				field := val.Field(fprop.GoField)
 				if field.Kind() != reflect.Chan {
-					fmt.Println("THIS ISNT A CHANNEL, WTF")
-					panic("pissss")
+					panic("repeated field was not a channel")
 				}
 
 				cases = append(cases, reflect.SelectCase{
@@ -238,7 +246,6 @@ func StreamEncode(w io.Writer, sm StreamMessage) error {
 					Dir:  reflect.SelectRecv,
 				})
 
-				fmt.Println("chan type = ", field.Type().Elem())
 				fields = append(fields, protoField)
 				types = append(types, field.Type().Elem())
 			}
@@ -276,7 +283,21 @@ func StreamEncode(w io.Writer, sm StreamMessage) error {
 					fmt.Println(err)
 					return
 				}
+			case string:
+				tag := combineTypeAndField(LengthDelim, fields[chosen])
+				err = writeTag(w, tag)
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
+
+				err := writeLengthDelimited(w, []byte(val))
+				if err != nil {
+					fmt.Println(err)
+					return
+				}
 			default:
+				fmt.Println(reflect.TypeOf(val))
 				fmt.Println("UNRECOGNIZED REPEATED FIELD TYPE")
 			}
 

@@ -1,0 +1,12 @@
+package main;
+
+message Company {
+    required string name = 1;
+    repeated Employee employees = 2;
+    optional string country = 3;
+
+    message Employee {
+      required string name = 1;
+      required uint32 age = 2;
+    }
+}

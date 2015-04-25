@@ -9,7 +9,6 @@ import (
 )
 
 var chatters = []string{"jbenet", "whyrusleeping", "mafintosh", "tperson", "odg", "substack"}
-
 var messages = []string{"Hey guys", "ipfs is cool", "protobufs are 1337", "i like cats"}
 
 func NewChatProtocol() *ChatProtocol {
@@ -20,6 +19,7 @@ func NewChatProtocol() *ChatProtocol {
 	cproto.errors = make(chan error)
 	return cproto
 }
+
 func ChatConsumer(r io.Reader) {
 	cproto := NewChatProtocol()
 

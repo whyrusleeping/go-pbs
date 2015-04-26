@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -193,7 +194,13 @@ func combineTypeAndField(typ, field byte) byte {
 	return (field << 3) | (typ & 0x7)
 }
 
-func writeLengthDelimited(w io.Writer, data []byte) error {
+func writeLengthDelimited(w io.Writer, field byte, data []byte) error {
+	tag := combineTypeAndField(LengthDelim, field)
+	err := writeTag(w, tag)
+	if err != nil {
+		return err
+	}
+
 	length := proto.EncodeVarint(uint64(len(data)))
 	n, err := w.Write(length)
 	if err != nil {
@@ -224,7 +231,13 @@ func writeTag(w io.Writer, tag byte) error {
 	return nil
 }
 
-func writeVarint(w io.Writer, v uint64) error {
+func writeVarint(w io.Writer, field byte, v uint64) error {
+	tag := combineTypeAndField(Varint, field)
+	err := writeTag(w, tag)
+	if err != nil {
+		return err
+	}
+
 	data := proto.EncodeVarint(v)
 	n, err := w.Write(data)
 	if err != nil {
@@ -236,7 +249,64 @@ func writeVarint(w io.Writer, v uint64) error {
 	return nil
 }
 
+func writeProtoVal(w io.Writer, sm StreamMessage, field byte, val interface{}) error {
+	switch val := val.(type) {
+	case proto.Message:
+		data, err := proto.Marshal(val)
+		if err != nil {
+			return err
+		}
+
+		err = writeLengthDelimited(w, field, data)
+		if err != nil {
+			return err
+		}
+	case string:
+		err := writeLengthDelimited(w, field, []byte(val))
+		if err != nil {
+			return err
+		}
+	case []byte:
+		err := writeLengthDelimited(w, field, val)
+		if err != nil {
+			return err
+		}
+	case int32:
+		err := writeVarint(w, field, uint64(val))
+		if err != nil {
+			return err
+		}
+	case int64:
+		err := writeVarint(w, field, uint64(val))
+		if err != nil {
+			return err
+		}
+	case bool:
+		var boolval uint64
+		if val {
+			boolval = 1
+		}
+
+		err := writeVarint(w, field, boolval)
+		if err != nil {
+			return err
+		}
+	default:
+		fmt.Println("UNRECOGNIZED REPEATED FIELD TYPE", reflect.TypeOf(val))
+		return errors.New("unrecognized repeated field type")
+	}
+
+	return nil
+}
+
+// StreamEncode will perform a streaming encode of the given protobuf
+// StreamMessage and write out the given writer. This function will
+// return when all non-channel fields have been encoded, and goroutines
+// will be spawned for the encoding of the channeled values. Those goroutines
+// will receive on the channels and send values along as they get them until
+// the StreamMessage is closed
 func StreamEncode(w io.Writer, sm StreamMessage) error {
+	// Parse out the protobuf struct tags
 	props, err := GetProperties(sm)
 	if err != nil {
 		return err
@@ -244,174 +314,50 @@ func StreamEncode(w io.Writer, sm StreamMessage) error {
 
 	val := reflect.ValueOf(sm).Elem()
 
+	se := &streamEncoder{out: w, sm: sm}
+
 	for protoField, fprop := range props.FieldMapping {
 		field := val.Field(fprop.GoField)
-		val := field
-		if val.Kind() == reflect.Ptr {
-			val = val.Elem()
-		}
-		if !fprop.Repeated {
-			switch val.Kind() {
-			case reflect.String:
-				tag := combineTypeAndField(LengthDelim, protoField)
-				err := writeTag(w, tag)
-				if err != nil {
-					return err
-				}
-
-				str := val.Interface().(string)
-				err = writeLengthDelimited(w, []byte(str))
-				if err != nil {
-					return err
-				}
-			case reflect.Int32:
-				tag := combineTypeAndField(Varint, protoField)
-				err := writeTag(w, tag)
-				if err != nil {
-					return err
-				}
-
-				err = writeVarint(w, uint64(val.Interface().(int32)))
-				if err != nil {
-					return err
-				}
-			case reflect.Int64:
-				tag := combineTypeAndField(Varint, protoField)
-				err := writeTag(w, tag)
-				if err != nil {
-					return err
-				}
-
-				err = writeVarint(w, uint64(val.Interface().(int64)))
-				if err != nil {
-					return err
-				}
-			case reflect.Bool:
-				b := val.Interface().(bool)
-				var boolval uint64
-				if b {
-					boolval = 1
-				}
-
-				tag := combineTypeAndField(Varint, protoField)
-				err := writeTag(w, tag)
-				if err != nil {
-					return err
-				}
-
-				err = writeVarint(w, boolval)
-				if err != nil {
-					return err
-				}
-			case reflect.Slice:
-				if val.Type().Elem().Kind() != reflect.Uint8 {
-					return fmt.Errorf("cannot handle arrays of non byte type")
-				}
-				tag := combineTypeAndField(LengthDelim, protoField)
-				err := writeTag(w, tag)
-				if err != nil {
-					return err
-				}
-
-				byteval := val.Interface().([]byte)
-				err = writeLengthDelimited(w, byteval)
-				if err != nil {
-					return err
-				}
-
-			default:
-				return fmt.Errorf("unhandled type: %s", val)
-			}
-		}
-	}
-
-	for protoField, fprop := range props.FieldMapping {
 		if fprop.Repeated {
-			field := val.Field(fprop.GoField)
+			// Sanity check
 			if field.Kind() != reflect.Chan {
 				return errors.New("repeated field was not a channel")
 			}
 
-			go handleChannelIn(w, sm, protoField, field.Type().Elem(), field)
+			go se.handleChannelIn(protoField, field)
+
+		} else {
+			if field.Kind() == reflect.Ptr {
+				field = field.Elem()
+			}
+			err := writeProtoVal(w, sm, protoField, field.Interface())
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
 }
 
-func handleChannelIn(w io.Writer, sm StreamMessage, field byte, typ reflect.Type, ch reflect.Value) {
+// streamEncoder is a helper struct to ensure that concurrent writes
+// dont get intermingled.
+type streamEncoder struct {
+	out io.Writer
+	sm  StreamMessage
+	lk  sync.Mutex
+}
+
+func (se *streamEncoder) handleChannelIn(field byte, ch reflect.Value) {
 	for {
 		val, ok := ch.Recv()
 		if !ok {
 			return
 		}
 
-		switch val := val.Interface().(type) {
-		case proto.Message:
-			data, err := proto.Marshal(val)
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-
-			tag := combineTypeAndField(LengthDelim, field)
-			err = writeTag(w, tag)
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-
-			err = writeLengthDelimited(w, data)
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-		case string:
-			tag := combineTypeAndField(LengthDelim, field)
-			err := writeTag(w, tag)
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-
-			err = writeLengthDelimited(w, []byte(val))
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-		case []byte:
-			tag := combineTypeAndField(LengthDelim, field)
-			err := writeTag(w, tag)
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-
-			err = writeLengthDelimited(w, val)
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-		case int32:
-			tag := combineTypeAndField(Varint, field)
-			err := writeTag(w, tag)
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-
-			err = writeVarint(w, uint64(val))
-			if err != nil {
-				sm.Errors() <- err
-				return
-			}
-		default:
-			fmt.Println("UNRECOGNIZED REPEATED FIELD TYPE", reflect.TypeOf(val))
-			sm.Errors() <- errors.New("unrecognized repeated field type")
-			return
-		}
-
-		_ = val
+		se.lk.Lock()
+		writeProtoVal(se.out, se.sm, field, val.Interface())
+		se.lk.Unlock()
 	}
 }
 

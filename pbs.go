@@ -2,9 +2,9 @@ package pbs
 
 import (
 	"bufio"
-	"code.google.com/p/goprotobuf/proto"
 	"errors"
 	"fmt"
+	"github.com/golang/protobuf/proto"
 	"io"
 	"reflect"
 	"strconv"
@@ -64,13 +64,14 @@ func readVarint(r *bufio.Reader) (int, error) {
 	return sum, nil
 }
 
-func (db *decBuffer) decodeField(field byte, data []byte) error {
+func (db *decBuffer) decodeField(tag byte, field byte, data []byte) error {
 	finfo := db.props.FieldMapping[field]
 
 	val := reflect.ValueOf(db.val).Elem()
 
 	f := val.Field(finfo.GoField)
-	if f.Type().Kind() == reflect.Chan {
+	switch {
+	case f.Type().Kind() == reflect.Chan:
 		// This is a 'repeated' field
 		// we just encode this value and send it along
 
@@ -91,15 +92,26 @@ func (db *decBuffer) decodeField(field byte, data []byte) error {
 			*pv = string(data)
 			f.Send(newVal.Elem())
 		default:
+			fmt.Println(reflect.TypeOf(pv))
+			fmt.Println(data)
 			return fmt.Errorf("Unrecognized type in protobuf field decode")
 		}
-	} else if f.Type().Elem().Kind() == reflect.String {
-		f.Set(reflect.New(f.Type().Elem()))
-		f.Elem().SetString(string(data))
-	} else {
-		fmt.Println("UNKNOWN")
-		fmt.Println(f)
-		return errors.New("TODO: fix this unsupported type")
+		/*
+			case f.Type().Elem().Kind() == reflect.String:
+				f.Set(reflect.New(f.Type().Elem()))
+				f.Elem().SetString(string(data))
+		*/
+	default:
+		/*
+			fmt.Println("UNKNOWN")
+			fmt.Println(f)
+			return errors.New("TODO: fix this unsupported type")
+		*/
+		buf := proto.NewBuffer(append([]byte{tag}, data...))
+		err := buf.Unmarshal(db.val)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -144,7 +156,7 @@ func StreamDecode(r io.Reader, sm StreamMessage) error {
 					sm.Errors() <- err
 					return
 				}
-				err = db.decodeField(f, val)
+				err = db.decodeField(b, f, val)
 				if err != nil {
 					sm.Errors() <- err
 					return

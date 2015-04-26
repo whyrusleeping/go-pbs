@@ -9,6 +9,7 @@ import (
 type TokenReader struct {
 	r      *bufio.Reader
 	buffer *bytes.Buffer
+	next   string
 }
 
 func NewTokenReader(r io.Reader) *TokenReader {
@@ -20,6 +21,11 @@ func NewTokenReader(r io.Reader) *TokenReader {
 
 func (tr *TokenReader) NextToken() (string, error) {
 	for {
+		if tr.next != "" {
+			out := tr.next
+			tr.next = ""
+			return out, nil
+		}
 		b, err := tr.r.ReadByte()
 		if err != nil {
 			if err == io.EOF && tr.buffer.Len() > 0 {
@@ -28,13 +34,13 @@ func (tr *TokenReader) NextToken() (string, error) {
 			return "", err
 		}
 
-		if b == ' ' || b == ';' || b == '\n' || b == '\t' {
+		if b == ' ' || b == ';' || b == '\n' || b == '\t' || b == '=' {
+			if b == ';' || b == '=' {
+				tr.next = string(b)
+			}
 			if tr.buffer.Len() > 0 {
 				out := tr.buffer.String()
 				tr.buffer.Reset()
-				if b == ';' {
-					tr.buffer.WriteByte(b)
-				}
 				return out, nil
 			}
 			continue

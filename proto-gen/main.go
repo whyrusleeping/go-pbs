@@ -100,7 +100,7 @@ func ParseMessage(r *TokenReader) (*Message, error) {
 		switch tok {
 		case "}":
 			return m, nil
-		case "repeated", "required":
+		case "repeated", "required", "optional":
 			// its a field!
 			f := &Field{Attribute: tok}
 			err := f.ParseField(r)
@@ -119,7 +119,7 @@ func ParseMessage(r *TokenReader) (*Message, error) {
 
 			m.SubMessages = append(m.SubMessages, subm)
 		default:
-			fmt.Println("Unrecognized token: ", tok)
+			return nil, fmt.Errorf("Unrecognized token: %s", tok)
 		}
 	}
 }

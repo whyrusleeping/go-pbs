@@ -1,0 +1,19 @@
+package pbs_test;
+
+message TestMessage {
+	repeated TestSubMessage tsubm = 1;
+	repeated int32 repint = 2;
+	repeated bytes repbytes = 8;
+	repeated string repstring = 9;
+
+	optional int32 a = 3;
+	optional string b = 4;
+	required int64 c = 5;
+	optional bool d = 6;
+	optional bytes e = 7;
+
+	message TestSubMessage {
+		optional string x=1;
+		repeated uint32 y=2;
+	}
+}

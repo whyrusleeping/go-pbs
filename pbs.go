@@ -64,7 +64,7 @@ func readVarint(r *bufio.Reader) (int, error) {
 	return sum, nil
 }
 
-func (db *decBuffer) decodeField(tag byte, field byte, data []byte) error {
+func (db *decBuffer) decodeField(field byte, data []byte) error {
 	finfo := db.props.FieldMapping[field]
 
 	val := reflect.ValueOf(db.val).Elem()
@@ -91,27 +91,21 @@ func (db *decBuffer) decodeField(tag byte, field byte, data []byte) error {
 		case *string:
 			*pv = string(data)
 			f.Send(newVal.Elem())
+		case *[]byte:
+			*pv = data
+			f.Send(newVal.Elem())
 		default:
 			fmt.Println(reflect.TypeOf(pv))
 			fmt.Println(data)
 			return fmt.Errorf("Unrecognized type in protobuf field decode")
 		}
-		/*
-			case f.Type().Elem().Kind() == reflect.String:
-				f.Set(reflect.New(f.Type().Elem()))
-				f.Elem().SetString(string(data))
-		*/
+	case f.Type().Elem().Kind() == reflect.String:
+		f.Set(reflect.New(f.Type().Elem()))
+		f.Elem().SetString(string(data))
 	default:
-		/*
-			fmt.Println("UNKNOWN")
-			fmt.Println(f)
-			return errors.New("TODO: fix this unsupported type")
-		*/
-		buf := proto.NewBuffer(append([]byte{tag}, data...))
-		err := buf.Unmarshal(db.val)
-		if err != nil {
-			return err
-		}
+		fmt.Println("UNKNOWN")
+		fmt.Println(f)
+		return errors.New("TODO: fix this unsupported type")
 	}
 	return nil
 }
@@ -147,6 +141,31 @@ func StreamDecode(r io.Reader, sm StreamMessage) error {
 
 			typ, f := splitTypeAndField(b)
 			switch typ {
+			case Varint:
+				i, err := readVarint(read)
+				if err != nil {
+					sm.Errors() <- err
+					return
+				}
+
+				field := reflect.ValueOf(sm).Elem().Field(props.FieldMapping[f].GoField)
+
+				fmt.Println("proto field: ", f)
+				fmt.Println("FIELD: ", field)
+				elemType := field.Type()
+				if elemType.Kind() == reflect.Chan {
+					elemType = elemType.Elem()
+				}
+				fmt.Println("elemtype: ", elemType)
+
+				nval := reflect.New(elemType.Elem())
+				nval.Elem().SetInt(int64(i))
+
+				if props.FieldMapping[f].Repeated {
+					field.Send(nval.Elem())
+				} else {
+					field.Set(nval)
+				}
 			case LengthDelim:
 				val, err := readLengthDelim(read)
 				if err != nil {
@@ -156,7 +175,7 @@ func StreamDecode(r io.Reader, sm StreamMessage) error {
 					sm.Errors() <- err
 					return
 				}
-				err = db.decodeField(b, f, val)
+				err = db.decodeField(f, val)
 				if err != nil {
 					sm.Errors() <- err
 					return
@@ -205,19 +224,34 @@ func writeTag(w io.Writer, tag byte) error {
 	return nil
 }
 
+func writeVarint(w io.Writer, v uint64) error {
+	data := proto.EncodeVarint(v)
+	n, err := w.Write(data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return errors.New("failed to write enough bytes")
+	}
+	return nil
+}
+
 func StreamEncode(w io.Writer, sm StreamMessage) error {
 	props, err := GetProperties(sm)
 	if err != nil {
 		return err
 	}
-	_ = props
 
 	val := reflect.ValueOf(sm).Elem()
 
 	for protoField, fprop := range props.FieldMapping {
 		field := val.Field(fprop.GoField)
+		val := field
+		if val.Kind() == reflect.Ptr {
+			val = val.Elem()
+		}
 		if !fprop.Repeated {
-			switch field.Elem().Kind() {
+			switch val.Kind() {
 			case reflect.String:
 				tag := combineTypeAndField(LengthDelim, protoField)
 				err := writeTag(w, tag)
@@ -225,99 +259,160 @@ func StreamEncode(w io.Writer, sm StreamMessage) error {
 					return err
 				}
 
-				str := field.Elem().Interface().(string)
+				str := val.Interface().(string)
 				err = writeLengthDelimited(w, []byte(str))
 				if err != nil {
 					return err
 				}
+			case reflect.Int32:
+				tag := combineTypeAndField(Varint, protoField)
+				err := writeTag(w, tag)
+				if err != nil {
+					return err
+				}
+
+				err = writeVarint(w, uint64(val.Interface().(int32)))
+				if err != nil {
+					return err
+				}
+			case reflect.Int64:
+				tag := combineTypeAndField(Varint, protoField)
+				err := writeTag(w, tag)
+				if err != nil {
+					return err
+				}
+
+				err = writeVarint(w, uint64(val.Interface().(int64)))
+				if err != nil {
+					return err
+				}
+			case reflect.Bool:
+				b := val.Interface().(bool)
+				var boolval uint64
+				if b {
+					boolval = 1
+				}
+
+				tag := combineTypeAndField(Varint, protoField)
+				err := writeTag(w, tag)
+				if err != nil {
+					return err
+				}
+
+				err = writeVarint(w, boolval)
+				if err != nil {
+					return err
+				}
+			case reflect.Slice:
+				if val.Type().Elem().Kind() != reflect.Uint8 {
+					return fmt.Errorf("cannot handle arrays of non byte type")
+				}
+				tag := combineTypeAndField(LengthDelim, protoField)
+				err := writeTag(w, tag)
+				if err != nil {
+					return err
+				}
+
+				byteval := val.Interface().([]byte)
+				err = writeLengthDelimited(w, byteval)
+				if err != nil {
+					return err
+				}
+
 			default:
-				fmt.Println(field.Elem().Kind())
+				return fmt.Errorf("unhandled type: %s", val)
 			}
 		}
 	}
 
-	go func() {
-		closeCase := reflect.SelectCase{
-			Chan: reflect.ValueOf(sm.Closed()),
-			Dir:  reflect.SelectRecv,
+	for protoField, fprop := range props.FieldMapping {
+		if fprop.Repeated {
+			field := val.Field(fprop.GoField)
+			if field.Kind() != reflect.Chan {
+				return errors.New("repeated field was not a channel")
+			}
+
+			go handleChannelIn(w, sm, protoField, field.Type().Elem(), field)
 		}
-
-		types := []reflect.Type{nil}
-		fields := []byte{0}
-
-		cases := []reflect.SelectCase{closeCase}
-		for protoField, fprop := range props.FieldMapping {
-			if fprop.Repeated {
-				field := val.Field(fprop.GoField)
-				if field.Kind() != reflect.Chan {
-					panic("repeated field was not a channel")
-				}
-
-				cases = append(cases, reflect.SelectCase{
-					Chan: field,
-					Dir:  reflect.SelectRecv,
-				})
-
-				fields = append(fields, protoField)
-				types = append(types, field.Type().Elem())
-			}
-		}
-
-		for {
-			chosen, val, ok := reflect.Select(cases)
-			if !ok {
-				fmt.Println("not okay, returning from select")
-				return
-			}
-
-			if chosen == 0 {
-				fmt.Println("got close signal, returning")
-				return
-			}
-
-			switch val := val.Interface().(type) {
-			case proto.Message:
-				data, err := proto.Marshal(val)
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-
-				tag := combineTypeAndField(LengthDelim, fields[chosen])
-				err = writeTag(w, tag)
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-
-				err = writeLengthDelimited(w, data)
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-			case string:
-				tag := combineTypeAndField(LengthDelim, fields[chosen])
-				err = writeTag(w, tag)
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-
-				err := writeLengthDelimited(w, []byte(val))
-				if err != nil {
-					fmt.Println(err)
-					return
-				}
-			default:
-				fmt.Println(reflect.TypeOf(val))
-				fmt.Println("UNRECOGNIZED REPEATED FIELD TYPE")
-			}
-
-			_ = val
-		}
-	}()
+	}
 
 	return nil
+}
+
+func handleChannelIn(w io.Writer, sm StreamMessage, field byte, typ reflect.Type, ch reflect.Value) {
+	for {
+		val, ok := ch.Recv()
+		if !ok {
+			return
+		}
+
+		switch val := val.Interface().(type) {
+		case proto.Message:
+			data, err := proto.Marshal(val)
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+
+			tag := combineTypeAndField(LengthDelim, field)
+			err = writeTag(w, tag)
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+
+			err = writeLengthDelimited(w, data)
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+		case string:
+			tag := combineTypeAndField(LengthDelim, field)
+			err := writeTag(w, tag)
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+
+			err = writeLengthDelimited(w, []byte(val))
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+		case []byte:
+			tag := combineTypeAndField(LengthDelim, field)
+			err := writeTag(w, tag)
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+
+			err = writeLengthDelimited(w, val)
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+		case int32:
+			tag := combineTypeAndField(Varint, field)
+			err := writeTag(w, tag)
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+
+			err = writeVarint(w, uint64(val))
+			if err != nil {
+				sm.Errors() <- err
+				return
+			}
+		default:
+			fmt.Println("UNRECOGNIZED REPEATED FIELD TYPE", reflect.TypeOf(val))
+			sm.Errors() <- errors.New("unrecognized repeated field type")
+			return
+		}
+
+		_ = val
+	}
 }
 
 type FieldInfo struct {

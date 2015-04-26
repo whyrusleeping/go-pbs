@@ -46,10 +46,14 @@ var typeMap = map[string]string{
 }
 
 // parseGoType returns the go representation of the passed in protobuf type
-func parseGoType(typ string, prefix string) string {
+func parseGoType(typ string, prefix string, rep bool) string {
 	t, ok := typeMap[typ]
 	if ok {
-		return t
+		if rep || t[:2] == "[]" {
+			return t
+		} else {
+			return "*" + t
+		}
 	}
 
 	return "*" + prefix + makeGoName(typ)
@@ -66,7 +70,7 @@ func formatGoProtoField(f *Field, prefix string, stream bool) string {
 			typ = "[]"
 		}
 	}
-	typ += parseGoType(f.Type, prefix)
+	typ += parseGoType(f.Type, prefix, f.Attribute == "repeated")
 	name := makeGoName(f.Name)
 
 	tag := fmt.Sprintf("`protobuf:\"%s,%d,%s,name=%s\"`", f.Type, f.Number, f.Attribute[:3], f.Name)
@@ -139,7 +143,7 @@ func printMessageConstructor(w io.Writer, mes *Message, name string, stream bool
 		fmt.Fprintf(w, "\t\tcloseCh: make(chan struct{}),\n")
 		for _, f := range mes.Fields {
 			if f.Attribute == "repeated" {
-				fmt.Fprintf(w, "\t\t%s: make(chan %s),\n", makeGoName(f.Name), parseGoType(f.Type, name+"_"))
+				fmt.Fprintf(w, "\t\t%s: make(chan %s),\n", makeGoName(f.Name), parseGoType(f.Type, name+"_", true))
 			}
 		}
 	}

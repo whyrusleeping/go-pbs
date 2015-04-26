@@ -8,10 +8,10 @@ type TestMessage struct {
 	Repint chan int32 `protobuf:"int32,2,rep,name=repint"`
 	Repbytes chan []byte `protobuf:"bytes,8,rep,name=repbytes"`
 	Repstring chan string `protobuf:"string,9,rep,name=repstring"`
-	A int32 `protobuf:"int32,3,opt,name=a"`
-	B string `protobuf:"string,4,opt,name=b"`
-	C int64 `protobuf:"int64,5,req,name=c"`
-	D bool `protobuf:"bool,6,opt,name=d"`
+	A *int32 `protobuf:"int32,3,opt,name=a"`
+	B *string `protobuf:"string,4,opt,name=b"`
+	C *int64 `protobuf:"int64,5,req,name=c"`
+	D *bool `protobuf:"bool,6,opt,name=d"`
 	E []byte `protobuf:"bytes,7,opt,name=e"`
 	errors chan error
 	closeCh chan struct{}
@@ -50,7 +50,7 @@ func (m *TestMessage) Reset() {*m = *NewTestMessage()}
 var _ pbs.StreamMessage = (*TestMessage)(nil)
 
 type TestMessage_TestSubMessage struct {
-	X string `protobuf:"string,1,opt,name=x"`
+	X *string `protobuf:"string,1,opt,name=x"`
 	Y []uint32 `protobuf:"uint32,2,rep,name=y"`
 }
 
